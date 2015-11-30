@@ -29,7 +29,7 @@ void hdSurEncPhase2_D2_13_15(uint8_t *cws);
 // Version info
 uint32_t GetOSemuVersion(void)
 {
-	return atoi("$Version: 719 $"+10);
+	return atoi("$Version: 728 $"+10);
 }
 
 // Key DB
@@ -94,7 +94,7 @@ static KeyDataContainer *GetKeyContainer(char identifier)
 	}
 }
 
-static void WriteKeyToFile(char identifier, uint32_t provider, const char *keyName, uint8_t *key, uint32_t keyLength)
+static void WriteKeyToFile(char identifier, uint32_t provider, const char *keyName, uint8_t *key, uint32_t keyLength, char* comment)
 {
 	char line[1200], dateText[100];
 	uint32_t pathLength;
@@ -167,21 +167,30 @@ static void WriteKeyToFile(char identifier, uint32_t provider, const char *keyNa
 
 	keyValue = (char*)malloc((keyLength*2)+1);
 	if(keyValue == NULL) {
+		fclose(file);
 		return;
 	}
 	cs_hexdump(0, key, keyLength, keyValue, (keyLength*2)+1);
 
-	snprintf(line, sizeof(line), "\n%c %04X %s %s ; added by OSEmu %s\n", identifier, provider, keyName, keyValue, dateText);
+	if(comment)
+	{
+		snprintf(line, sizeof(line), "\n%c %04X %s %s ; added by OSEmu %s %s\n", identifier, provider, keyName, keyValue, dateText, comment);
+	}
+	else
+	{
+		snprintf(line, sizeof(line), "\n%c %04X %s %s ; added by OSEmu %s\n", identifier, provider, keyName, keyValue, dateText);
+	}
 	free(keyValue);
 
 	fwrite(line, strlen(line), 1, file);
 	fclose(file);
 }
 
+// key must come from malloc() !
 static int32_t SetKey(char identifier, uint32_t provider, const char *keyName, uint8_t *key,
-					  uint32_t keyLength, uint8_t writeKey)
+					  uint32_t keyLength, uint8_t writeKey, char *comment)
 {
-	uint32_t i;
+	uint32_t i, j;
 	uint8_t *tmpKey = NULL, *orgKey = NULL;
 	KeyDataContainer *KeyDB;
 	KeyData *tmpKeyData, *newKeyData;
@@ -227,8 +236,8 @@ static int32_t SetKey(char identifier, uint32_t provider, const char *keyName, u
 			continue;
 		}
 
-		// allow multiple keys for Irdeto
-		if(identifier == 'I')
+		// allow multiple keys for Irdeto and Powervu
+		if(identifier == 'I' || identifier == 'P')
 		{
 			// reject duplicates
 			tmpKeyData = &KeyDB->EmuKeys[i];
@@ -239,7 +248,7 @@ static int32_t SetKey(char identifier, uint32_t provider, const char *keyName, u
 					}
 					return 0;
 				}
-				tmpKeyData = (KeyData*)tmpKeyData->nextKey;
+				tmpKeyData = tmpKeyData->nextKey;
 			}
 			while(tmpKeyData != NULL);
 
@@ -265,23 +274,34 @@ static int32_t SetKey(char identifier, uint32_t provider, const char *keyName, u
 			newKeyData->nextKey = NULL;
 
 			tmpKeyData = &KeyDB->EmuKeys[i];
+			j = 0;
 			while(tmpKeyData->nextKey != NULL) {
-				tmpKeyData = (KeyData*)tmpKeyData->nextKey;
+				if(j == 0xFE)
+				{
+					break;
+				}
+				tmpKeyData = tmpKeyData->nextKey;
+				j++;
+			}
+			if(tmpKeyData->nextKey)
+			{
+				NULLFREE(tmpKeyData->nextKey->key);
+				NULLFREE(tmpKeyData->nextKey);
 			}
 			tmpKeyData->nextKey = newKeyData;
 
 			if(writeKey) {
-				WriteKeyToFile(identifier, provider, keyName, key, keyLength);
+				WriteKeyToFile(identifier, provider, keyName, key, keyLength, comment);
 			}
 		}
-		else // identifier != 'I'
+		else // identifier != ('I' || 'P')
 		{
 			free(KeyDB->EmuKeys[i].key);
 			KeyDB->EmuKeys[i].key = key;
 			KeyDB->EmuKeys[i].keyLength = keyLength;
 
 			if(writeKey) {
-				WriteKeyToFile(identifier, provider, keyName, key, keyLength);
+				WriteKeyToFile(identifier, provider, keyName, key, keyLength, comment);
 			}
 		}
 
@@ -330,7 +350,7 @@ static int32_t SetKey(char identifier, uint32_t provider, const char *keyName, u
 	KeyDB->keyCount++;
 
 	if(writeKey) {
-		WriteKeyToFile(identifier, provider, keyName, key, keyLength);
+		WriteKeyToFile(identifier, provider, keyName, key, keyLength, comment);
 	}
 
 	if(tmpKey != NULL) {
@@ -343,7 +363,7 @@ static int32_t FindKey(char identifier, uint32_t provider, const char *keyName, 
 					   uint8_t isCriticalKey, uint8_t keyRef, uint8_t matchLength, uint32_t *getProvider)
 {
 	uint32_t i;
-	uint8_t j;
+	uint16_t j;
 	KeyDataContainer *KeyDB;
 	KeyData *tmpKeyData;
 
@@ -372,7 +392,7 @@ static int32_t FindKey(char identifier, uint32_t provider, const char *keyName, 
 		j = 0;
 		while(j<keyRef && tmpKeyData->nextKey != NULL) {
 			j++;
-			tmpKeyData = (KeyData*)tmpKeyData->nextKey;
+			tmpKeyData = tmpKeyData->nextKey;
 		}
 
 		if(j == keyRef) {
@@ -396,24 +416,33 @@ static int32_t FindKey(char identifier, uint32_t provider, const char *keyName, 
 	return 0;
 }
 
-static int32_t UpdateKey(char identifier, uint32_t provider, char *keyName, uint8_t *key, uint32_t keyLength)
+// key must come from malloc() !
+static int32_t UpdateKey(char identifier, uint32_t provider, char *keyName, uint8_t *key, uint32_t keyLength, char *comment)
 {
+	uint8_t keyRef = 0;
 	uint8_t *tmpKey = (uint8_t*)malloc(sizeof(uint8_t)*keyLength);
 	if(tmpKey == NULL)
 	{
 		return 0;
 	}
-
-	if(FindKey(identifier, provider, keyName, tmpKey, keyLength, 0, 0, 0, NULL)
-			&& memcmp(tmpKey, key, keyLength) == 0)
+		
+	while(FindKey(identifier, provider, keyName, tmpKey, keyLength, 0, keyRef, 0, NULL))
 	{
-		free(tmpKey);
-		return 0;
+		if(memcmp(tmpKey, key, keyLength) == 0)
+		{		
+			free(tmpKey);
+			return 0;
+		}
+		if(keyRef == 0xFF)
+		{
+			break;
+		}
+		keyRef++;
 	}
 
 	free(tmpKey);
 
-	return SetKey(identifier, provider, keyName, key, keyLength, 1);
+	return SetKey(identifier, provider, keyName, key, keyLength, 1, comment);
 }
 
 
@@ -501,7 +530,7 @@ uint8_t read_emu_keyfile(const char *opath)
 		}
 
 		CharToBin(key, keyString, strlen(keyString));
-		if(!SetKey(identifier, provider, keyName, key, keyLength, 0)) {
+		if(!SetKey(identifier, provider, keyName, key, keyLength, 0, NULL)) {
 			free(key);
 		}
 	}
@@ -542,7 +571,7 @@ void read_emu_keymemory(void)
 		}
 
 		CharToBin(key, keyString, strlen(keyString));
-		if(!SetKey(identifier, provider, keyName, key, keyLength, 0)) {
+		if(!SetKey(identifier, provider, keyName, key, keyLength, 0, NULL)) {
 			free(key);
 		}
 		line = strtok_r(NULL, "\n", &saveptr);
@@ -2174,11 +2203,17 @@ static int8_t Nagra2ECM(uint8_t *ecm, uint8_t *dw)
 }
 
 // Irdeto EMU
-static int8_t GetIrdetoKey(uint8_t *buf, uint32_t ident, char keyName, uint32_t keyIndex, uint8_t isCriticalKey, uint8_t *keyRef)
+static int8_t GetIrdetoKey(uint8_t *buf, uint32_t ident, char keyName, uint32_t keyIndex, uint8_t isCriticalKey, uint16_t *keyRef)
 {
 	char keyStr[EMU_MAX_CHAR_KEYNAME];
+	
+	if(*keyRef > 0xFF)
+	{
+		return 0;
+	}
+	
 	snprintf(keyStr, EMU_MAX_CHAR_KEYNAME, "%c%X", keyName, keyIndex);
-	if(FindKey('I', ident, keyStr, buf, 16, *keyRef > 0 ? 0 : isCriticalKey, *keyRef, 0, NULL)) {
+	if(FindKey('I', ident, keyStr, buf, 16, *keyRef > 0 ? 0 : isCriticalKey, (uint8_t)*keyRef, 0, NULL)) {
 		(*keyRef)++;
 		return 1;
 	}
@@ -2261,7 +2296,7 @@ static int8_t Irdeto2ECM(uint16_t caid, uint8_t *oecm, uint8_t *dw)
 {
 	uint8_t keyNr=0, length, end, key[16], okeySeed[16], keySeed[16], keyIV[16], tmp[16];
 	uint32_t i, l, ident;
-	uint8_t key0Ref, keySeedRef, keyIVRef;
+	uint16_t key0Ref, keySeedRef, keyIVRef;
 	uint8_t ecmCopy[EMU_MAX_ECM_LEN], *ecm = oecm;
 	uint16_t ecmLen = GetEcmLen(ecm);
 
@@ -2390,11 +2425,17 @@ static int8_t BissECM(uint16_t UNUSED(caid), const uint8_t *ecm, int16_t ecmData
 }
 
 //PowerVu Emu
-static int8_t GetPowervuKey(uint8_t *buf, uint32_t ident, char keyName, uint32_t keyIndex, uint32_t keyLength, uint8_t isCriticalKey)
+static int8_t GetPowervuKey(uint8_t *buf, uint32_t ident, char keyName, uint32_t keyIndex, uint32_t keyLength, uint8_t isCriticalKey, uint16_t keyRef)
 {
 	char keyStr[EMU_MAX_CHAR_KEYNAME];
+	
+	if(keyRef > 0xFF)
+	{
+		return 0;
+	}
+	
 	snprintf(keyStr, EMU_MAX_CHAR_KEYNAME, "%c%X", keyName, keyIndex);
-	if(FindKey('P', ident, keyStr, buf, keyLength, isCriticalKey, 0, 0, NULL)) {
+	if(FindKey('P', ident, keyStr, buf, keyLength, isCriticalKey, (uint8_t)keyRef, 0, NULL)) {
 		return 1;
 	}
 
@@ -2439,7 +2480,7 @@ static uint8_t PowervuSbox(uint8_t *input, uint8_t mode)
 	uint8_t s_index, bit, last_index, last_bit;
 	uint8_t const *Sbox1, *Sbox2, *Sbox3, *Sbox4, *Sbox5, *Sbox6, *Sbox7, *Sbox8, *Sbox9;
 
-	if(mode == 0xA0)
+	if(mode)
 	{
 		Sbox1 = PowerVu_A0_S_1;
 		Sbox2 = PowerVu_A0_S_2;
@@ -2499,7 +2540,7 @@ static uint8_t PowervuSbox(uint8_t *input, uint8_t mode)
 	return (GetBit(Sbox9[last_index&0x1f],7-last_bit)&1) ? 1: 0;
 }
 
-static void PowervuDecrypt(uint8_t *data, uint32_t length, uint8_t *key)
+static void PowervuDecrypt(uint8_t *data, uint32_t length, uint8_t *key, uint8_t sbox)
 {
 	uint32_t i;
 	int32_t j, k;
@@ -2511,7 +2552,7 @@ static void PowervuDecrypt(uint8_t *data, uint32_t length, uint8_t *key)
 
 		for(j=7; j>=0; j--)
 		{
-			data[i] = SetBit(data[i], j,(GetBit(curByte,j)^PowervuSbox(key, 0))^GetBit(key[0],7));
+			data[i] = SetBit(data[i], j,(GetBit(curByte,j)^PowervuSbox(key, sbox))^GetBit(key[0],7));
 
 			tmpBit = GetBit(data[i],j)^(GetBit(key[6],0));
 			if (tmpBit)
@@ -2636,7 +2677,7 @@ static void PowervuExpandSeed(uint8_t seedType, uint8_t *seed)
 	}
 }
 
-static void PowervuCalculateSeed(uint8_t seedType, uint8_t *ecm, uint8_t *seedBase, uint8_t *key, uint8_t *seed)
+static void PowervuCalculateSeed(uint8_t seedType, uint8_t *ecm, uint8_t *seedBase, uint8_t *key, uint8_t *seed, uint8_t sbox)
 {
 	uint16_t tmpSeed;
 
@@ -2648,7 +2689,7 @@ static void PowervuCalculateSeed(uint8_t seedType, uint8_t *ecm, uint8_t *seedBa
 	seed[4] = (seedBase[2]<<6) | (seedBase[3]>>2);
 	seed[5] = (seedBase[3]<<6);
 
-	PowervuDecrypt(seed, 6, key);
+	PowervuDecrypt(seed, 6, key, sbox);
 
 	seed[0] = (seed[1]<<2) | (seed[2]>>6);
 	seed[1] = (seed[2]<<2) | (seed[3]>>6);
@@ -2690,7 +2731,7 @@ static void PowervuCalculateCw(uint8_t seedType, uint8_t *seed, uint8_t csaUsed,
 }
 
 #ifdef WITH_EMU
-int8_t PowervuECM(uint8_t *ecm, uint8_t *dw, uint16_t srvid, emu_stream_client_key_data *cdata)
+int8_t PowervuECM(uint8_t *ecm, uint8_t *dw, uint16_t srvid, emu_stream_client_key_data *cdata, EXTENDED_CW* cw_ex)
 #else
 int8_t PowervuECM(uint8_t *ecm, uint8_t *dw, emu_stream_client_key_data *cdata)
 #endif
@@ -2698,15 +2739,18 @@ int8_t PowervuECM(uint8_t *ecm, uint8_t *dw, emu_stream_client_key_data *cdata)
 	int8_t ret = 1;
 	uint16_t ecmLen = GetEcmLen(ecm);
 	uint32_t ecmCrc32;
-	uint8_t nanoCmd, nanoChecksum, keyType, fixedKey, oddKey, bid, keyIndex, csaUsed;
+	uint8_t nanoCmd, nanoChecksum, keyType, fixedKey, oddKey, bid, csaUsed;
 	uint16_t nanoLen;
-	uint32_t channelId, ecmSrvid, channelIdSearch, ecmSrvidSearch, keyCounter;
+	uint32_t channelId, ecmSrvid, keyIndex;
 	uint32_t i, j, k;
 	uint8_t convolvedCw[8][8];
 	uint8_t ecmKey[7], tmpEcmKey[7], seedBase[4], baseCw[7], seed[8][8], cw[8][8];
 	uint8_t decrypt_ok;
 	uint8_t ecmPart1[14], ecmPart2[27];
+	uint8_t sbox;
+	uint16_t keyRef1, keyRef2;
 #ifdef WITH_EMU
+	uint8_t *dwp;
 	emu_stream_cw_item *cw_item;
 	int8_t update_global_key = 0;
 	int8_t update_global_keys[EMU_STREAM_SERVER_MAX_CONNECTIONS];
@@ -2794,55 +2838,52 @@ int8_t PowervuECM(uint8_t *ecm, uint8_t *dw, emu_stream_client_key_data *cdata)
 			fixedKey = !GetBit(ecm[i+6], 5);
 			oddKey = GetBit(ecm[i+6], 4);
 			bid = (GetBit(ecm[i+7], 1)<<1) | GetBit(ecm[i+7], 0);
-
+			sbox = GetBit(ecm[i+6], 3);
+			
 			keyIndex = (fixedKey<<3) | (bid<<2) | oddKey;
 			channelId = b2i(2, ecm+i+23);
 			ecmSrvid = (channelId >> 4) | ((channelId & 0xF) << 12);
 			
 			decrypt_ok = 0;
-			keyCounter = 0;
 			
 			memcpy(ecmPart1, ecm+i+8, 14);
 			memcpy(ecmPart2, ecm+i+27, 27);
 			
+			keyRef1 = 0;
+			keyRef2 = 0;
+			
 			do
-			{
-				channelIdSearch = channelId | (keyCounter << 16);
-				ecmSrvidSearch = ecmSrvid | (keyCounter << 16);
-				
-				if(!GetPowervuKey(ecmKey, ecmSrvidSearch, '0', keyIndex, 7, 0))
+			{					
+				if(!GetPowervuKey(ecmKey, ecmSrvid, '0', keyIndex, 7, 0, keyRef1++))
 				{
-					if(!GetPowervuKey(ecmKey, channelIdSearch, '0', keyIndex, 7, 0))
+					if(!GetPowervuKey(ecmKey, channelId, '0', keyIndex, 7, 0, keyRef2++))
 					{
-						GetPowervuKey(ecmKey, ecmSrvidSearch, '0', keyIndex, 7, 1);
+						cs_log("[Emu] Key not found: P %04X 0%X", ecmSrvid, keyIndex);
 						return 2;
 					}
 				}
 
-				PowervuDecrypt(ecm+i+8, 14, ecmKey);
+				PowervuDecrypt(ecm+i+8, 14, ecmKey, sbox);
 				if((ecm[i+6] != ecm[i+6+7]) || (ecm[i+6+8] != ecm[i+6+15]))
 				{
 					memcpy(ecm+i+8, ecmPart1, 14);
-					keyCounter++;
 					continue;
 				}
 				
 				memcpy(tmpEcmKey, ecmKey, 7);
 
-				PowervuDecrypt(ecm+i+27, 27, ecmKey);
+				PowervuDecrypt(ecm+i+27, 27, ecmKey, sbox);
 				if((ecm[i+23] != ecm[i+23+29]) || (ecm[i+23+1] != ecm[i+23+30]))
 				{
 					memcpy(ecm+i+8, ecmPart1, 14);
 					memcpy(ecm+i+27, ecmPart2, 27);
-					keyCounter++;
 					continue;
 				}
 				
 				decrypt_ok = 1;
-				break;
 			}
 			while(!decrypt_ok);
-
+			
 			memcpy(seedBase, ecm+i+6+2, 4);
 	
 #ifdef WITH_EMU	
@@ -2860,7 +2901,7 @@ int8_t PowervuECM(uint8_t *ecm, uint8_t *dw, emu_stream_client_key_data *cdata)
 				SAFE_MUTEX_UNLOCK(&emu_fixed_key_srvid_mutex);
 			}
 			
-			if(cdata != NULL || update_global_key)
+			if(cdata != NULL || update_global_key || cw_ex != NULL)
 #else	
 			if(cdata != NULL)
 #endif
@@ -2869,22 +2910,20 @@ int8_t PowervuECM(uint8_t *ecm, uint8_t *dw, emu_stream_client_key_data *cdata)
 				for(j=0; j<8; j++)
 				{
 					memcpy(ecmKey, tmpEcmKey, 7);
-					PowervuCalculateSeed(j, ecm+i, seedBase, ecmKey, seed[j]);
+					PowervuCalculateSeed(j, ecm+i, seedBase, ecmKey, seed[j], sbox);
 				}				
 			}
 			else
 			{
-				// Calculate only video and audio1 seed
+				// Calculate only video seed
 				memcpy(ecmKey, tmpEcmKey, 7);
-				PowervuCalculateSeed(PVU_CW_VID, ecm+i, seedBase, ecmKey, seed[PVU_CW_VID]);
-				//memcpy(ecmKey, tmpEcmKey, 7);
-				//PowervuCalculateSeed(PVU_CW_A1, ecm+i, seedBase, ecmKey, seed[PVU_CW_A1]);	
+				PowervuCalculateSeed(PVU_CW_VID, ecm+i, seedBase, ecmKey, seed[PVU_CW_VID], sbox);
 			}
 			
 			memcpy(baseCw, ecm+i+6+8, 7);
 
 #ifdef WITH_EMU
-			if(cdata != NULL || update_global_key)
+			if(cdata != NULL || update_global_key || cw_ex != NULL)
 #else
 			if(cdata != NULL)
 #endif
@@ -2922,7 +2961,8 @@ int8_t PowervuECM(uint8_t *ecm, uint8_t *dw, emu_stream_client_key_data *cdata)
 						}
 					}
 				}
-				else 
+				
+				if(cdata != NULL) 
 				{
 #endif
 					for(j=0; j<8; j++)
@@ -2951,20 +2991,96 @@ int8_t PowervuECM(uint8_t *ecm, uint8_t *dw, emu_stream_client_key_data *cdata)
 					}
 #ifdef WITH_EMU
 				}
+				
+				if(cw_ex != NULL)
+				{	
+					cw_ex->mode = CW_MODE_MULTIPLE_CW;
+					
+					if(csaUsed)
+					{
+						cw_ex->algo = CW_ALGO_CSA;
+						cw_ex->algo_mode = CW_ALGO_MODE_ECB;
+					}
+					else
+					{
+						cw_ex->algo = CW_ALGO_DES;
+						cw_ex->algo_mode = CW_ALGO_MODE_ECB;
+					}
+					
+					for(j=0; j<4; j++)
+					{	
+						dwp = cw_ex->audio[j];
+						
+						memset(dwp, 0, 16);
+						
+						if(ecm[0] == 0x80)
+						{
+							memcpy(dwp, cw[PVU_CW_A1+j], 8);
+						
+							if(csaUsed)
+							{
+								for(k = 0; k < 8; k += 4)
+								{
+									dwp[k + 3] = ((dwp[k] + dwp[k + 1] + dwp[k + 2]) & 0xff);
+								}
+							}
+						}
+						else
+						{
+							memcpy(&dwp[8], cw[PVU_CW_A1+j], 8);
+							
+							if(csaUsed)
+							{
+								for(k = 8; k < 16; k += 4)
+								{
+									dwp[k + 3] = ((dwp[k] + dwp[k + 1] + dwp[k + 2]) & 0xff);
+								}
+							}
+						}
+					}
+					
+					dwp = cw_ex->data;
+					
+					memset(dwp, 0, 16);
+					
+					if(ecm[0] == 0x80)
+					{
+						memcpy(dwp, cw[PVU_CW_HSD], 8);
+					
+						if(csaUsed)
+						{
+							for(k = 0; k < 8; k += 4)
+							{
+								dwp[k + 3] = ((dwp[k] + dwp[k + 1] + dwp[k + 2]) & 0xff);
+							}
+						}
+					}
+					else
+					{
+						memcpy(&dwp[8], cw[PVU_CW_HSD], 8);
+						
+						if(csaUsed)
+						{
+							for(k = 8; k < 16; k += 4)
+							{
+								dwp[k + 3] = ((dwp[k] + dwp[k + 1] + dwp[k + 2]) & 0xff);
+							}
+						}
+					}
+				}
 #endif		
 			}
 			else
 			{
-				// Calculate only video and audio1 cw
+				// Calculate only video cw
 				PowervuCalculateCw(PVU_CW_VID, seed[PVU_CW_VID], csaUsed, convolvedCw[PVU_CW_VID], cw[PVU_CW_VID], baseCw);
-				//PowervuCalculateCw(PVU_CW_A1, seed[PVU_CW_A1], csaUsed, convolvedCw[PVU_CW_A1], cw[PVU_CW_A1], baseCw);
 			}
 			
 			memset(dw, 0, 16);
 			
 			if(ecm[0] == 0x80)
 			{
-				memcpy(dw, cw[PVU_CW_VID], 8);		
+				memcpy(dw, cw[PVU_CW_VID], 8);
 			
 				if(csaUsed)
 				{
@@ -3013,71 +3129,79 @@ static int8_t GetDrecryptKey(uint8_t *buf, uint32_t keyIdent, uint16_t keyName, 
 	return 0;
 }
 
-static const uint8_t drecrypt_const[128] = {
-	0x0E, 0x04, 0x0D, 0x01, 0x02, 0x0F, 0x0B, 0x08, 0x03, 0x0A, 0x06, 0x0C, 0x05, 0x09, 0x00, 0x07,
-	0x0F, 0x01, 0x08, 0x0E, 0x06, 0x0B, 0x03, 0x04, 0x09, 0x07, 0x02, 0x0D, 0x0C, 0x00, 0x05, 0x0A,
-	0x0A, 0x00, 0x09, 0x0E, 0x06, 0x03, 0x0F, 0x05, 0x01, 0x0D, 0x0C, 0x07, 0x0B, 0x04, 0x02, 0x08,
-	0x07, 0x0D, 0x0E, 0x03, 0x00, 0x06, 0x09, 0x0A, 0x01, 0x02, 0x08, 0x05, 0x0B, 0x0C, 0x04, 0x0F,
-	0x02, 0x0C, 0x04, 0x01, 0x07, 0x0A, 0x0B, 0x06, 0x08, 0x05, 0x03, 0x0F, 0x0D, 0x00, 0x0E, 0x09,
-	0x0C, 0x01, 0x0A, 0x0F, 0x09, 0x02, 0x06, 0x08, 0x00, 0x0D, 0x03, 0x04, 0x0E, 0x07, 0x05, 0x0B,
-	0x04, 0x0B, 0x02, 0x0E, 0x0F, 0x00, 0x08, 0x0D, 0x03, 0x0C, 0x09, 0x07, 0x05, 0x0A, 0x06, 0x01,
-	0x0D, 0x02, 0x08, 0x04, 0x06, 0x0F, 0x0B, 0x01, 0x0A, 0x09, 0x03, 0x0E, 0x05, 0x00, 0x0C, 0x07
+static void DrecryptOver(const unsigned char *ECMdata, unsigned char *DW)
+{
+	uint8_t key[8];
+	char keyStr[EMU_MAX_CHAR_KEYNAME];
+	uint32_t key_schedule[32];
+		
+	if(ECMdata[2] >= (43 + 4) && ECMdata[40] == 0x3A && ECMdata[41] == 0x4B)
+	{
+		snprintf(keyStr, EMU_MAX_CHAR_KEYNAME, "%X", (ECMdata[42] & 0x0F));
+		
+		if(!FindKey('D', 0, keyStr, key, 8, 1, 0, 0, NULL))
+		{
+			return;
+		}
+		
+		des_set_key(key, key_schedule);
+
+		des(DW, key_schedule, 0); // even DW post-process
+		des(DW + 8, key_schedule, 0);  // odd DW post-process
+	}
 };
 
-static void DrecryptDecryptStep1(uint8_t* data, uint8_t *key)
+static uint32_t DrecryptGostDec(uint32_t inData)
 {
-	uint8_t x, y;
-	uint32_t i, a = 0, b = 0, k = 0;
-	uint64_t c;
-	uint8_t *pc = (uint8_t*)&c;
-		
-	for(i = 0; i < 4; i++) {
-		a = (a << 8) | data[i];
-		b = (b << 8) | key[i];
-	}	
-
-	c = a + b + (uint32_t)((uint32_t)(a + b) >= 0xFFFFFFFF);
-
-	for(i = 0; i < 4; i++) {
-		x = pc[3 - i] >> 4;
-		y = pc[3 - i] & 0xF;
-		x = drecrypt_const[(16 * k++) + x];
-		y = drecrypt_const[(16 * k++) + y];
-		pc[3 - i] = 16 * x | y;
+	static const uint8_t DrecryptSbox[128] = {
+		0x0E,0x04,0x0D,0x01,0x02,0x0F,0x0B,0x08,0x03,0x0A,0x06,0x0C,0x05,0x09,0x00,0x07,
+		0x0F,0x01,0x08,0x0E,0x06,0x0B,0x03,0x04,0x09,0x07,0x02,0x0D,0x0C,0x00,0x05,0x0A,
+		0x0A,0x00,0x09,0x0E,0x06,0x03,0x0F,0x05,0x01,0x0D,0x0C,0x07,0x0B,0x04,0x02,0x08,
+		0x07,0x0D,0x0E,0x03,0x00,0x06,0x09,0x0A,0x01,0x02,0x08,0x05,0x0B,0x0C,0x04,0x0F,
+		0x02,0x0C,0x04,0x01,0x07,0x0A,0x0B,0x06,0x08,0x05,0x03,0x0F,0x0D,0x00,0x0E,0x09,
+		0x0C,0x01,0x0A,0x0F,0x09,0x02,0x06,0x08,0x00,0x0D,0x03,0x04,0x0E,0x07,0x05,0x0B,
+		0x04,0x0B,0x02,0x0E,0x0F,0x00,0x08,0x0D,0x03,0x0C,0x09,0x07,0x05,0x0A,0x06,0x01,
+		0x0D,0x02,0x08,0x04,0x06,0x0F,0x0B,0x01,0x0A,0x09,0x03,0x0E,0x05,0x00,0x0C,0x07
+	};
+	
+	uint8_t i, j;
+	
+	for(i=0;i<8;i++) {
+		j= (inData  >> 28) & 0x0F;
+		inData= (inData << 4) | (DrecryptSbox[i*16 + j] & 0x0F);
 	}
 	
-	c = (c >> 21) | (c << 11);
+	inData= (inData << 11) | (inData >> 21);
 	
-	for(i = 0; i < 4; i++) {
-		data[i] = pc[3 - i];
-	}
+	return (inData);
 }
 
-static void DrecryptDecrypt(uint8_t* data, uint8_t *key)
+static void DrecryptDecrypt(uint8_t *Data, uint8_t *Key)
 {
-	uint32_t i, j, b;
+	int32_t i, j;
+	uint32_t L_part = 0, R_part = 0, temp = 0;
 
-	for(i = 0; i < 8; i++) {
-		memcpy(&b, data, 4);
-		DrecryptDecryptStep1(data, key + (4 * i) );	
-		xxor(data + 4, 4, data, data + 4);
-		memcpy(data, data + 4, 4);
-		memcpy(data + 4, &b, 4);
+	for(i=0;i<4;i++) {
+		L_part = (L_part << 8) | (Data[i] & 0xFF), R_part = (R_part << 8) | (Data[i+4] & 0xFF);
 	}
-	
-	for(i = 0; i < 3; i++) {
-		for(j = 0; j < 8; j++) {
-			memcpy(&b, data, 4);
-			DrecryptDecryptStep1(data, key + 4 * (7 - j));
-			xxor(data + 4, 4, data, data + 4);
-			memcpy(data, data + 4, 4);
-			memcpy(data + 4, &b, 4);
+
+	for(i=0;i<4;i++) {
+		temp= ((Key[i*8+0] & 0xFF)<<24) | ((Key[i*8+1] & 0xFF)<<16) | ((Key[i*8+2] & 0xFF)<<8) | (Key[i*8+3] & 0xFF);
+		R_part^= DrecryptGostDec(temp + L_part);
+		temp= ((Key[i*8+4] & 0xFF)<<24) | ((Key[i*8+5] & 0xFF)<<16) | ((Key[i*8+6] & 0xFF)<<8) | (Key[i*8+7] & 0xFF);
+		L_part^= DrecryptGostDec(temp + R_part);
+	}
+
+	for(j=0;j<3;j++) {
+		for(i=3;i>=0;i--) {
+			temp= ((Key[i*8+4] & 0xFF)<<24) | ((Key[i*8+5] & 0xFF)<<16) | ((Key[i*8+6] & 0xFF)<<8) | (Key[i*8+7] & 0xFF);
+			R_part^= DrecryptGostDec(temp + L_part);
+			temp= ((Key[i*8+0] & 0xFF)<<24) | ((Key[i*8+1] & 0xFF)<<16) | ((Key[i*8+2] & 0xFF)<<8) | (Key[i*8+3] & 0xFF);
+			L_part^= DrecryptGostDec(temp + R_part);
 		}
 	}
-	
-	memcpy(&b, data, 4);
-	memcpy(data, data + 4, 4);
-	memcpy(data + 4, &b, 4);
+
+	for(i=0;i<4;i++) Data[i] = (R_part >> i*8) & 0xFF, Data[i+4] = (L_part >> i*8) & 0xFF;
 }
 
 static void DrecryptPostCw(uint8_t* ccw)
@@ -3119,46 +3243,47 @@ static int8_t Drecrypt2ECM(uint16_t caid, uint32_t provId, uint8_t *ecm, uint8_t
 	uint32_t keyIdent;	
 
 	uint16_t ecmLen = GetEcmLen(ecm);
-	if(ecmLen < 30) {
+	if(ecmLen < 30 || caid != 0x4AE1) {
 		return 1;
 	}
 
-	if(provId == 0x94) {
-		provId = 0x14;
+	switch(provId & 0xFF)
+	{
+		case 0x11:
+		case 0x14:
+			break;
+		default:
+			return 1;
 	}
-   	else if(provId == 0x10) {
-   		provId = 0x11;
-   	}
-   	else if(provId == 0x90) {
-   		provId = 0x91;
-   	}
-   	
-   	if(provId == 0) {
-   		provId = 0x11;
-   	}
 	
-	keyType = ecm[3];
+	keyType = ecm[6];
 	keyIndex = ecm[5];
 
 	keyIdent = caid<<8 | provId;
 	keyName = keyType<<8 | keyIndex;
 
 	keyRef = 0;
-	while(GetDrecryptKey(key, keyIdent, keyName, 1, &keyRef)) {
+	while(GetDrecryptKey(key, keyIdent, keyName, 1, &keyRef))
+	{
 		memcpy(ccw, ecm+13, 16);
+		DrecryptPostCw(key);
+		DrecryptPostCw(key+16);
 		DrecryptDecrypt(ccw, key);
 		DrecryptDecrypt(ccw+8, key);
-		DrecryptPostCw(ccw);
-		DrecryptSwap(ccw);
 		
-        if(ecmLen >= 46 && ecm[43] == 1)
-        {    
-            overcryptId = b2i(2, &ecm[44]);
-            Drecrypt2OverCW(overcryptId, ccw);
-            Drecrypt2OverCW(overcryptId, ccw+8);
-        }		
+		if(ecmLen >= 46 && ecm[43] == 1)
+		{
+			DrecryptSwap(ccw);
+			overcryptId = b2i(2, &ecm[44]);
+			Drecrypt2OverCW(overcryptId, ccw);
+			memcpy(dw, ccw, 16);
+			return 0;
+		}
+		
+		DrecryptOver(ecm, ccw);
 		
 		if(isValidDCW(ccw)) {
+			DrecryptSwap(ccw);
 			memcpy(dw, ccw, 16);
 			return 0;	
 		}
@@ -3206,8 +3331,13 @@ const char* GetProcessECMErrorReason(int8_t result)
 6  CW checksum error
 7  Out of memory
 */
+#ifdef WITH_EMU
+int8_t ProcessECM(int16_t ecmDataLen, uint16_t caid, uint32_t provider, const uint8_t *ecm,
+				  uint8_t *dw, uint16_t srvid, uint16_t ecmpid, EXTENDED_CW* cw_ex)
+#else
 int8_t ProcessECM(int16_t ecmDataLen, uint16_t caid, uint32_t provider, const uint8_t *ecm,
 				  uint8_t *dw, uint16_t srvid, uint16_t ecmpid)
+#endif
 {
 	int8_t result = 1, i;
 	uint8_t ecmCopy[EMU_MAX_ECM_LEN];
@@ -3252,7 +3382,7 @@ int8_t ProcessECM(int16_t ecmDataLen, uint16_t caid, uint32_t provider, const ui
 	}
 	else if((caid>>8)==0x0E) {
 #ifdef WITH_EMU
-		result = PowervuECM(ecmCopy,dw,srvid,NULL);
+		result = PowervuECM(ecmCopy,dw,srvid,NULL,cw_ex);
 #else
 		result = PowervuECM(ecmCopy,dw,NULL);
 #endif
@@ -3465,7 +3595,7 @@ static int8_t ViaccessEMM(uint8_t *emm, uint32_t *keysAdded)
 					return 7;
 				}
 				memcpy(newKeyD0, keyD0, 2);
-				if(!SetKey('V', ecmProvider, "D0", newKeyD0, 2, 1)) {
+				if(!SetKey('V', ecmProvider, "D0", newKeyD0, 2, 1, NULL)) {
 					free(newKeyD0);
 				}
 				for(j=0; j<ecmKeyCount; j++) {
@@ -3475,7 +3605,7 @@ static int8_t ViaccessEMM(uint8_t *emm, uint32_t *keysAdded)
 					}
 					memcpy(newEcmKey, ecmKeys[j], 16);
 					snprintf(keyName, EMU_MAX_CHAR_KEYNAME, "E%X", ecmKeyIndex[j]);
-					if(!SetKey('V', ecmProvider, keyName, newEcmKey, 16, 1)) {
+					if(!SetKey('V', ecmProvider, keyName, newEcmKey, 16, 1, NULL)) {
 						free(newEcmKey);
 					}
 					(*keysAdded)++;
@@ -3544,7 +3674,7 @@ static int8_t Irdeto2DoEMMTypeOP(uint32_t ident, uint8_t *emm, uint8_t *keySeed,
 					}
 					memcpy(newOpKey, &emm[i+3], 16);
 					snprintf(keyName, EMU_MAX_CHAR_KEYNAME, "%02X", emm[i+2]>>2);
-					if(!SetKey('I', ident, keyName, newOpKey, 16, 1)) {
+					if(!SetKey('I', ident, keyName, newOpKey, 16, 1, NULL)) {
 						free(newOpKey);
 					}
 					(*keysAdded)++;
@@ -3616,7 +3746,7 @@ static int8_t Irdeto2DoEMMTypePMK(uint32_t ident, uint8_t *emm, uint8_t *keySeed
 						}
 						memcpy(newPmkKey, &emm[i+3+j*16], 16);
 						snprintf(keyName, EMU_MAX_CHAR_KEYNAME, "M%01X", 3+j);
-						if(!SetKey('I', ident, keyName, newPmkKey, 16, 1)) {
+						if(!SetKey('I', ident, keyName, newPmkKey, 16, 1, NULL)) {
 							free(newPmkKey);
 						}
 						(*keysAdded)++;
@@ -3642,7 +3772,7 @@ static int8_t Irdeto2EMM(uint16_t caid, uint8_t *oemm, uint32_t *keysAdded)
 {
 	uint8_t length, okeySeed[16], keySeed[16], keyIV[16], keyPMK[16], startOffset, emmType;
 	uint32_t ident;
-	uint8_t keySeedRef, keyIVRef, keyPMK0Ref, keyPMK1Ref, keyPMK0ERef, keyPMK1ERef;
+	uint16_t keySeedRef, keyIVRef, keyPMK0Ref, keyPMK1Ref, keyPMK0ERef, keyPMK1ERef;
 	uint8_t emmCopy[EMU_MAX_EMM_LEN], *emm = oemm;
 	uint16_t emmLen = GetEcmLen(emm);
 
@@ -3778,28 +3908,32 @@ static int8_t PowervuEMM(uint8_t *emm, uint32_t *keysAdded)
 {
 	uint8_t emmInfo, emmType, *newEcmKey;
 	uint16_t emmLen = GetEcmLen(emm);
-	uint32_t i, emmCrc32, uniqueAddress, channelId;
-	uint8_t emmKey[7], tmpEmmKey[7];
+	uint32_t i, uniqueAddress, channelId;
+	//uint32_t emmCrc32;
+	uint8_t emmKey[7], tmpEmmKey[7], tmp[26];
 	char keyName[EMU_MAX_CHAR_KEYNAME], keyValue[16];
+	char uaInfo[4+8+1];
 
 	if(emmLen < 50)
 	{
 		return 1;
 	}
 
-	emmCrc32 = b2i(4, emm+emmLen-4);
-
-	if(fletcher_crc32(emm, emmLen-4) != emmCrc32)
-	{
-		return 8;
-	}
+	// looks like checksum does not work for all EMMs
+	//emmCrc32 = b2i(4, emm+emmLen-4);
+	//
+	//if(fletcher_crc32(emm, emmLen-4) != emmCrc32)
+	//{
+	//	return 8;
+	//}
 	emmLen -= 4;
 
 	uniqueAddress = b2i(4, emm+12);
 
 	snprintf(keyName, EMU_MAX_CHAR_KEYNAME, "%.8X", uniqueAddress);
-	if(!GetPowervuEmmKey(emmKey, 0, keyName, 7, 1, &channelId))
+	if(!GetPowervuEmmKey(emmKey, 0, keyName, 7, 0, &channelId))
 	{
+		cs_log("[Emu] EMM eror: AU key for UA %s is missing", keyName);
 		return 2;
 	}
 
@@ -3813,18 +3947,33 @@ static int8_t PowervuEMM(uint8_t *emm, uint32_t *keysAdded)
 
 		//keyNb = emm[i] & 0x0F;
 
+		memcpy(tmp, emm+i+1, 26);
 		memcpy(tmpEmmKey, emmKey, 7);
-		PowervuDecrypt(emm+i+1, 26, tmpEmmKey);
+		PowervuDecrypt(emm+i+1, 26, tmpEmmKey, 0);
 
 		if((emm[13] != emm[i+24]) || (emm[14] != emm[i+25]) || (emm[15] != emm[i+26]))
 		{
-			continue;
+			memcpy(emm+i+1, tmp, 26);
+			memcpy(tmpEmmKey, emmKey, 7);
+			PowervuDecrypt(emm+i+1, 26, tmpEmmKey, 1);
+
+			if((emm[13] != emm[i+24]) || (emm[14] != emm[i+25]) || (emm[15] != emm[i+26]))
+			{
+				continue;
+			}
 		}
 
 		emmType = emm[i+2] & 0x7F;
 		if(emmType > 1)
 		{
 			continue;
+		}
+		
+		if(emm[i+3] == 0 && emm[i+4] == 0)
+		{
+			cs_hexdump(0, &emm[i+3], 7, keyValue, sizeof(keyValue));
+			cs_log("[Emu] Key found in EMM: P %.4X %s %s -> REJECTED (looks invalid) UA: %X", channelId, keyName, keyValue, uniqueAddress);
+			continue;	
 		}
 
 		newEcmKey = (uint8_t*)malloc(sizeof(uint8_t)*7);
@@ -3833,12 +3982,13 @@ static int8_t PowervuEMM(uint8_t *emm, uint32_t *keysAdded)
 		}
 		memcpy(newEcmKey, &emm[i+3], 7);
 		snprintf(keyName, EMU_MAX_CHAR_KEYNAME, "%.2X", emmType);
-		if(!UpdateKey('P', channelId, keyName, newEcmKey, 7)) {
+		snprintf(uaInfo, sizeof(uaInfo), "UA: %08X", uniqueAddress);
+		if(!UpdateKey('P', channelId, keyName, newEcmKey, 7, uaInfo)) {
 			free(newEcmKey);
 		}
 		(*keysAdded)++;
 		cs_hexdump(0, &emm[i+3], 7, keyValue, sizeof(keyValue));
-		cs_log("[Emu] Key found in EMM: P %.4X %s %s", channelId, keyName, keyValue);
+		cs_log("[Emu] Key found in EMM: P %.4X %s %s ; UA: %X", channelId, keyName, keyValue, uniqueAddress);
 	}
 
 	return 0;
@@ -3895,43 +4045,36 @@ static int8_t Drecrypt2EMM(uint16_t caid, uint32_t provId, uint8_t *emm, uint32_
 	uint8_t emmKey[32];
 	int32_t i;
 	uint8_t *newEcmKey;
+	uint8_t keynum, keyidx, keyclass, key1offset, key2offset;
 	char newKeyName[EMU_MAX_CHAR_KEYNAME], keyValue[100];
-
-	if(emmLen < 1) {
+	
+	if(emmLen < 5 || caid != 0x4AE1) {
 		return 1;
 	}
 
-    if(emm[0] == 0x91) {
-        Drecrypt2OverEMM(emm);
-        return 0;
-    }
-       
-    provId &= 0xFF;
-    
-	if(provId == 0x94) {
-		provId = 0x14;
-	}
-   	else if(provId == 0x10) {
-   		provId = 0x11;
-   	}
-   	else if(provId == 0x90) {
-   		provId = 0x91;
-   	}
-
-   	if(provId == 0) {
-   		provId = 0x11;
-   	}
-   	
-    if (emm[0] != 0x86) {
-        return 0;
-    }
-
-	if (emmLen < 0x86) {
+	if(emm[0] == 0x91) {
+		Drecrypt2OverEMM(emm);
 		return 0;
 	}
 	
+	switch(provId & 0xFF)
+	{
+		case 0x11:
+			if (emmLen < (0x8B + 32)) return 0;
+			if (emm[0] != 0x86 && emm[4] != 0x4D) return 0;
+			keynum = 0x61; keyidx = 0x60; keyclass = 0x05; key1offset = 0x62; key2offset = 0x8B;
+			break;
+		case 0x14:
+			if (emmLen < (0x6D + 32)) return 0;
+			if (emm[0] != 0x86 && emm[4] != 0x02) return 0;
+			keynum = 0x2C; keyidx = 0x30; keyclass = 0x26; key1offset = 0x35; key2offset = 0x6D;
+			break;
+		default:
+			return 0;
+	}
+		
 	keyIdent = caid<<8 | provId;
-	keyName = emm[0x3]<<8 | emm[0x2C];
+	keyName = emm[0x3]<<8 | emm[keynum];
 
 	if(!GetDrecryptEMMKey(emmKey, keyIdent, keyName, 1)) {
 		return 2; 
@@ -3939,42 +4082,42 @@ static int8_t Drecrypt2EMM(uint16_t caid, uint32_t provId, uint8_t *emm, uint32_
 	
 	//key #1
 	for(i=0; i<4; i++) {
-		DrecryptDecrypt(&emm[0x35+(i*8)], emmKey);
+		DrecryptDecrypt(&emm[key1offset+(i*8)], emmKey);
 	}
 
 	//key #2
 	for(i=0; i<4; i++) {
-		DrecryptDecrypt(&emm[0x6D+(i*8)], emmKey);
+		DrecryptDecrypt(&emm[key2offset+(i*8)], emmKey);
 	}
 	
 	//key #1
-	keyName = emm[0x30]<<8 | emm[0x26];
+	keyName = emm[keyidx]<<8 | emm[keyclass];
 	newEcmKey = (uint8_t*)malloc(sizeof(uint8_t)*32);
 	if(newEcmKey == NULL) {
 		return 7;
 	}
-	memcpy(newEcmKey, &emm[0x35], 32);		
+	memcpy(newEcmKey, &emm[key1offset], 32);		
 	snprintf(newKeyName, EMU_MAX_CHAR_KEYNAME, "%.4X", keyName);
-	if(!UpdateKey('D', keyIdent, newKeyName, newEcmKey, 32)) {
+	if(!UpdateKey('D', keyIdent, newKeyName, newEcmKey, 32, NULL)) {
 		free(newEcmKey);
 	}
 	(*keysAdded)++;
-	cs_hexdump(0, &emm[0x35], 32, keyValue, sizeof(keyValue));
+	cs_hexdump(0, &emm[key1offset], 32, keyValue, sizeof(keyValue));
 	cs_log("[Emu] Key found in EMM: D %.6X %s %s", keyIdent, newKeyName, keyValue);
 
 	//key #2
-	keyName = emm[0x68]<<8 | emm[0x5E];
+	keyName = (emm[keyidx] == 0x56 ? 0x3B00 : 0x5600) | emm[keyclass];
 	newEcmKey = (uint8_t*)malloc(sizeof(uint8_t)*32);
 	if(newEcmKey == NULL) {
 		return 7;
 	}
-	memcpy(newEcmKey, &emm[0x6D], 32);	
+	memcpy(newEcmKey, &emm[key2offset], 32);	
 	snprintf(newKeyName, EMU_MAX_CHAR_KEYNAME, "%.4X", keyName);
-	if(!UpdateKey('D', keyIdent, newKeyName, newEcmKey, 32)) {
+	if(!UpdateKey('D', keyIdent, newKeyName, newEcmKey, 32, NULL)) {
 		free(newEcmKey);
 	}
 	(*keysAdded)++;
-	cs_hexdump(0, &emm[0x6D], 32, keyValue, sizeof(keyValue));
+	cs_hexdump(0, &emm[key2offset], 32, keyValue, sizeof(keyValue));
 	cs_log("[Emu] Key found in EMM: D %.6X %s %s", keyIdent, newKeyName, keyValue); 	
 	
 	return 0;

@@ -234,16 +234,17 @@ static void ParsePMTData(emu_stream_client_data *cdata)
 		es_info_length = b2i(2, data+i+3) &0xFFF;
 		
 		if(stream_type == 0x01 || stream_type == 0x02 || stream_type == 0x10 || stream_type == 0x1B 
-			|| stream_type == 0x24 || stream_type == 0x42 || stream_type == 0xD1 || stream_type == 0xEA) 
+			|| stream_type == 0x24 || stream_type == 0x42 || stream_type == 0x80 || stream_type == 0xD1 
+			|| stream_type == 0xEA)
 		{ 
 			cdata->video_pid = stream_pid;
 			cs_log_dbg(D_READER, "[Emu] stream found video pid: %X", stream_pid);
 		}
 		
-		if(stream_type == 0x03 || stream_type == 0x04 || stream_type == 0x06 || stream_type == 0x0F 
-			|| stream_type == 0x11 || (stream_type >= 0x80 && stream_type <= 0x87))
+		else if(stream_type == 0x03 || stream_type == 0x04 || stream_type == 0x0F || stream_type == 0x11 
+			|| stream_type == 0x81 || stream_type == 0x87)
 		{
-			if(cdata->audio_pid_count >= 4)
+			if(cdata->audio_pid_count >= EMU_STREAM_MAX_AUDIO_SUB_TRACKS)
 				{ continue; }
 			
 			cdata->audio_pids[cdata->audio_pid_count] = stream_pid;
@@ -267,7 +268,7 @@ static void ParseECMData(emu_stream_client_data *cdata)
 	{
 		cdata->ecm_nb = data[0xb];
 #ifdef WITH_EMU
-		PowervuECM(data, dcw, cdata->srvid, &cdata->key);
+		PowervuECM(data, dcw, cdata->srvid, &cdata->key, NULL);
 #else
 		PowervuECM(data, dcw, &cdata->key);
 #endif
@@ -287,17 +288,17 @@ static void ParseTSPackets(emu_stream_client_data *data, uint8_t *stream_buf, ui
 	int8_t oddKeyUsed;
 	uint32_t *deskey;
 	uint8_t *pdata;
-	uint8_t *packetClusterA[4][64];  //separate cluster arrays for video and each audio track
+	uint8_t *packetClusterA[EMU_STREAM_MAX_AUDIO_SUB_TRACKS][64];  //separate cluster arrays for video and each audio track
 	uint8_t *packetClusterV[256];
-	void *csakeyA[4] = {0,0,0,0};
+	void *csakeyA[EMU_STREAM_MAX_AUDIO_SUB_TRACKS] = {0};
 	void *csakeyV = 0;
 	emu_stream_client_key_data *keydata;
 	uint32_t scrambled_packets = 0;
-	uint32_t scrambled_packetsA[4]  = {0,0,0,0};
+	uint32_t scrambled_packetsA[EMU_STREAM_MAX_AUDIO_SUB_TRACKS]  = {0};
 	packetClusterV[0] = NULL;
 	uint32_t cs =0;  //video cluster start
 	uint32_t ce =1;  //video cluster end
-	uint32_t csa[4] = {0,0,0,0};  //cluster index for audio tracks
+	uint32_t csa[EMU_STREAM_MAX_AUDIO_SUB_TRACKS] = {0};  //cluster index for audio tracks
 	
 	for(i=0; i<bufLength; i+=packetSize)
 	{		

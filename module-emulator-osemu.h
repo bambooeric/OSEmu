@@ -1,3 +1,4 @@
+#include "globals.h"
 #include "module-emulator-stream.h"
 
 #ifndef EMULATOR_H_
@@ -6,17 +7,19 @@
 #define EMU_MAX_CHAR_KEYNAME 12
 #define EMU_KEY_FILENAME "SoftCam.Key"
 #define EMU_KEY_FILENAME_MAX_LEN 31
-#define EMU_MAX_ECM_LEN 1024
-#define EMU_MAX_EMM_LEN 1024
+#define EMU_MAX_ECM_LEN MAX_ECM_SIZE
+#define EMU_MAX_EMM_LEN MAX_EMM_SIZE
 
-	typedef struct {
+	typedef struct KeyData KeyData;
+	
+	struct KeyData {
 		char identifier;
 		uint32_t provider;
 		char keyName[EMU_MAX_CHAR_KEYNAME];
 		uint8_t *key;
 		uint32_t keyLength;
-		void *nextKey;
-	} KeyData;
+		KeyData *nextKey;
+	};
 
 	typedef struct {
 		KeyData *EmuKeys;
